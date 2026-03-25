@@ -68,9 +68,12 @@ services:
     volumes:
       - ./nginx/${NGINX_CONF:-nginx.conf}:/etc/nginx/nginx.conf:ro
     depends_on:
-      - frontend
-      - gateway
-      - langgraph
+      frontend:
+        condition: service_healthy
+      gateway:
+        condition: service_healthy
+      langgraph:
+        condition: service_healthy
     networks:
       - deer-flow-dev
     restart: unless-stopped
@@ -102,6 +105,12 @@ services:
     networks:
       - deer-flow-dev
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3000 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s
 
   # Backend - Gateway API
   gateway:
@@ -151,6 +160,12 @@ services:
     networks:
       - deer-flow-dev
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8001/health >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
 
   # Backend - LangGraph Server
   langgraph:
@@ -200,6 +215,12 @@ services:
     networks:
       - deer-flow-dev
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:2024/docs >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s
 
 volumes:
   # Persist .venv across container restarts so dependencies installed during
