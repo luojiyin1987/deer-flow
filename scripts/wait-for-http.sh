@@ -12,6 +12,7 @@
 # Exit codes:
 #   0 - Endpoint responded successfully
 #   1 - Timed out waiting
+#   2 - No supported HTTP client found
 
 set -euo pipefail
 
@@ -21,43 +22,71 @@ SERVICE="${3:-Service}"
 
 elapsed=0
 interval=1
+HTTP_CLIENT=""
 
-probe_http() {
+detect_http_client() {
     if command -v curl >/dev/null 2>&1; then
-        curl --silent --show-error --fail --output /dev/null "$URL" >/dev/null 2>&1
-        return $?
+        HTTP_CLIENT="curl"
+        return 0
     fi
 
     if command -v wget >/dev/null 2>&1; then
-        wget --quiet --spider "$URL" >/dev/null 2>&1
-        return $?
+        HTTP_CLIENT="wget"
+        return 0
     fi
 
     if command -v python3 >/dev/null 2>&1; then
-        python3 - "$URL" >/dev/null 2>&1 <<'PY'
-import sys
-import urllib.request
-
-with urllib.request.urlopen(sys.argv[1], timeout=2):
-    pass
-PY
-        return $?
+        HTTP_CLIENT="python3"
+        return 0
     fi
 
     if command -v python >/dev/null 2>&1; then
-        python - "$URL" >/dev/null 2>&1 <<'PY'
-import sys
-import urllib.request
-
-with urllib.request.urlopen(sys.argv[1], timeout=2):
-    pass
-PY
-        return $?
+        HTTP_CLIENT="python"
+        return 0
     fi
 
-    echo "✗ No HTTP client available. Install curl, wget, or python." >&2
+    echo "✗ No HTTP client available. Install curl, wget, or python3." >&2
     return 1
 }
+
+probe_with_python() {
+    "$HTTP_CLIENT" - "$URL" >/dev/null 2>&1 <<'PY'
+import sys
+try:
+    import urllib.request as urllib_request
+except ImportError:
+    import urllib2 as urllib_request
+
+with urllib_request.urlopen(sys.argv[1], timeout=2):
+    pass
+PY
+}
+
+probe_http() {
+    case "$HTTP_CLIENT" in
+        curl)
+            if curl --silent --fail --output /dev/null "$URL" >/dev/null 2>&1; then
+                return 0
+            fi
+            ;;
+        wget)
+            if wget --quiet --spider "$URL" >/dev/null 2>&1; then
+                return 0
+            fi
+            ;;
+        python3|python)
+            if probe_with_python; then
+                return 0
+            fi
+            ;;
+    esac
+
+    return 1
+}
+
+if ! detect_http_client; then
+    exit 2
+fi
 
 while ! probe_http; do
     if [ "$elapsed" -ge "$TIMEOUT" ]; then
