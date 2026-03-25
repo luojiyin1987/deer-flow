@@ -142,6 +142,11 @@ LANGGRAPH_LOG_LEVEL="${LANGGRAPH_LOG_LEVEL:-${CONFIG_LOG_LEVEL:-info}}"
     fi
     cleanup
 }
+bash ./scripts/wait-for-http.sh "http://127.0.0.1:2024/docs" 60 "LangGraph" || {
+    echo "✗ LangGraph readiness check failed. Last log output:"
+    tail -60 logs/langgraph.log
+    cleanup
+}
 echo "✓ LangGraph server started on localhost:2024"
 
 echo "Starting Gateway API..."
@@ -156,6 +161,11 @@ echo "Starting Gateway API..."
     echo "  Hint: Try running 'make config-upgrade' to update your config.yaml with the latest fields."
     cleanup
 }
+bash ./scripts/wait-for-http.sh "http://127.0.0.1:8001/health" 30 "Gateway API" || {
+    echo "✗ Gateway API readiness check failed. Last log output:"
+    tail -60 logs/gateway.log
+    cleanup
+}
 echo "✓ Gateway API started on localhost:8001"
 
 echo "Starting Frontend..."
@@ -163,6 +173,11 @@ echo "Starting Frontend..."
 ./scripts/wait-for-port.sh 3000 120 "Frontend" || {
     echo "  See logs/frontend.log for details"
     tail -20 logs/frontend.log
+    cleanup
+}
+bash ./scripts/wait-for-http.sh "http://127.0.0.1:3000" 120 "Frontend" || {
+    echo "✗ Frontend readiness check failed. Last log output:"
+    tail -60 logs/frontend.log
     cleanup
 }
 echo "✓ Frontend started on localhost:3000"
@@ -173,6 +188,11 @@ NGINX_PID=$!
 ./scripts/wait-for-port.sh 2026 10 "Nginx" || {
     echo "  See logs/nginx.log for details"
     tail -10 logs/nginx.log
+    cleanup
+}
+bash ./scripts/wait-for-http.sh "http://127.0.0.1:2026/health" 10 "Nginx" || {
+    echo "✗ Nginx readiness check failed. Last log output:"
+    tail -60 logs/nginx.log
     cleanup
 }
 echo "✓ Nginx started on localhost:2026"
