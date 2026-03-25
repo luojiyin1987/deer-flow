@@ -84,6 +84,12 @@ nohup sh -c 'cd backend && NO_COLOR=1 uv run langgraph dev --no-browser --allow-
     cleanup_on_failure
     exit 1
 }
+bash ./scripts/wait-for-http.sh "http://127.0.0.1:2024/docs" 60 "LangGraph" || {
+    echo "✗ LangGraph readiness check failed. Last log output:"
+    tail -60 logs/langgraph.log
+    cleanup_on_failure
+    exit 1
+}
 echo "✓ LangGraph server started on localhost:2024"
 
 echo "Starting Gateway API..."
@@ -93,6 +99,12 @@ nohup sh -c 'cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --hos
     tail -60 logs/gateway.log
     echo ""
     echo "  Hint: Try running 'make config-upgrade' to update your config.yaml with the latest fields."
+    cleanup_on_failure
+    exit 1
+}
+bash ./scripts/wait-for-http.sh "http://127.0.0.1:8001/health" 30 "Gateway API" || {
+    echo "✗ Gateway API readiness check failed. Last log output:"
+    tail -60 logs/gateway.log
     cleanup_on_failure
     exit 1
 }
@@ -106,12 +118,24 @@ nohup sh -c 'cd frontend && pnpm run dev > ../logs/frontend.log 2>&1' &
     cleanup_on_failure
     exit 1
 }
+bash ./scripts/wait-for-http.sh "http://127.0.0.1:3000" 120 "Frontend" || {
+    echo "✗ Frontend readiness check failed. Last log output:"
+    tail -60 logs/frontend.log
+    cleanup_on_failure
+    exit 1
+}
 echo "✓ Frontend started on localhost:3000"
 
 echo "Starting Nginx reverse proxy..."
 nohup sh -c 'nginx -g "daemon off;" -c "$1/docker/nginx/nginx.local.conf" -p "$1" > logs/nginx.log 2>&1' _ "$REPO_ROOT" &
 ./scripts/wait-for-port.sh 2026 10 "Nginx" || {
     echo "✗ Nginx failed to start. Last log output:"
+    tail -60 logs/nginx.log
+    cleanup_on_failure
+    exit 1
+}
+bash ./scripts/wait-for-http.sh "http://127.0.0.1:2026/health" 10 "Nginx" || {
+    echo "✗ Nginx readiness check failed. Last log output:"
     tail -60 logs/nginx.log
     cleanup_on_failure
     exit 1
