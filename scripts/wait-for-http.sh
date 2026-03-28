@@ -57,20 +57,24 @@ try:
 except ImportError:
     import urllib2 as urllib_request
 
-with urllib_request.urlopen(sys.argv[1], timeout=2):
-    pass
+resp = None
+try:
+    resp = urllib_request.urlopen(sys.argv[1], timeout=2)
+finally:
+    if resp is not None:
+        resp.close()
 PY
 }
 
 probe_http() {
     case "$HTTP_CLIENT" in
         curl)
-            if curl --silent --fail --output /dev/null "$URL" >/dev/null 2>&1; then
+            if curl --silent --fail --connect-timeout 2 --max-time 2 --output /dev/null "$URL" >/dev/null 2>&1; then
                 return 0
             fi
             ;;
         wget)
-            if wget --quiet --spider "$URL" >/dev/null 2>&1; then
+            if wget --quiet --timeout=2 --tries=1 --spider "$URL" >/dev/null 2>&1; then
                 return 0
             fi
             ;;
