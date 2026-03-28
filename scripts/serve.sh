@@ -92,6 +92,7 @@ fi
 # ── Cleanup trap ─────────────────────────────────────────────────────────────
 
 cleanup() {
+    local exit_code="${1:-0}"
     trap - INT TERM
     echo ""
     echo "Shutting down services..."
@@ -112,7 +113,7 @@ cleanup() {
     echo "Cleaning up sandbox containers..."
     ./scripts/cleanup-containers.sh deer-flow-sandbox 2>/dev/null || true
     echo "✓ All services stopped"
-    exit 0
+    exit "$exit_code"
 }
 trap cleanup INT TERM
 
@@ -140,12 +141,12 @@ LANGGRAPH_LOG_LEVEL="${LANGGRAPH_LOG_LEVEL:-${CONFIG_LOG_LEVEL:-info}}"
         echo ""
         echo "  Hint: This may be a configuration issue. Try running 'make config-upgrade' to update your config.yaml."
     fi
-    cleanup
+    cleanup 1
 }
 bash ./scripts/wait-for-http.sh "http://127.0.0.1:2024/docs" 60 "LangGraph" || {
     echo "✗ LangGraph readiness check failed. Last log output:"
     tail -60 logs/langgraph.log
-    cleanup
+    cleanup 1
 }
 echo "✓ LangGraph server started on localhost:2024"
 
@@ -159,12 +160,12 @@ echo "Starting Gateway API..."
     grep -E "Failed to load configuration|Environment variable .* not found|config\.yaml.*not found" logs/gateway.log | tail -5 || true
     echo ""
     echo "  Hint: Try running 'make config-upgrade' to update your config.yaml with the latest fields."
-    cleanup
+    cleanup 1
 }
 bash ./scripts/wait-for-http.sh "http://127.0.0.1:8001/health" 30 "Gateway API" || {
     echo "✗ Gateway API readiness check failed. Last log output:"
     tail -60 logs/gateway.log
-    cleanup
+    cleanup 1
 }
 echo "✓ Gateway API started on localhost:8001"
 
@@ -173,12 +174,12 @@ echo "Starting Frontend..."
 ./scripts/wait-for-port.sh 3000 120 "Frontend" || {
     echo "  See logs/frontend.log for details"
     tail -20 logs/frontend.log
-    cleanup
+    cleanup 1
 }
 bash ./scripts/wait-for-http.sh "http://127.0.0.1:3000" 120 "Frontend" || {
     echo "✗ Frontend readiness check failed. Last log output:"
     tail -60 logs/frontend.log
-    cleanup
+    cleanup 1
 }
 echo "✓ Frontend started on localhost:3000"
 
@@ -188,12 +189,12 @@ NGINX_PID=$!
 ./scripts/wait-for-port.sh 2026 10 "Nginx" || {
     echo "  See logs/nginx.log for details"
     tail -10 logs/nginx.log
-    cleanup
+    cleanup 1
 }
 bash ./scripts/wait-for-http.sh "http://127.0.0.1:2026/health" 10 "Nginx" || {
     echo "✗ Nginx readiness check failed. Last log output:"
     tail -60 logs/nginx.log
-    cleanup
+    cleanup 1
 }
 echo "✓ Nginx started on localhost:2026"
 
