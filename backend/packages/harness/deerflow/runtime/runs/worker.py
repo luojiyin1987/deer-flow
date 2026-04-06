@@ -55,6 +55,7 @@ async def run_agent(
     requested_modes: set[str] = set(stream_modes or ["values"])
     pre_run_checkpoint_id: str | None = None
     pre_run_snapshot: dict[str, Any] | None = None
+    snapshot_capture_failed = False
 
     # Track whether "events" was requested but skipped
     if "events" in requested_modes:
@@ -82,7 +83,8 @@ async def run_agent(
                         "pending_writes": copy.deepcopy(getattr(ckpt_tuple, "pending_writes", []) or []),
                     }
             except Exception:
-                logger.debug("Could not capture pre-run checkpoint snapshot for run %s", run_id)
+                snapshot_capture_failed = True
+                logger.warning("Could not capture pre-run checkpoint snapshot for run %s", run_id, exc_info=True)
 
         # 2. Publish metadata — useStream needs both run_id AND thread_id
         await bridge.publish(
@@ -190,6 +192,7 @@ async def run_agent(
                         run_id=run_id,
                         pre_run_checkpoint_id=pre_run_checkpoint_id,
                         pre_run_snapshot=pre_run_snapshot,
+                        snapshot_capture_failed=snapshot_capture_failed,
                     )
                     logger.info("Run %s rolled back to pre-run checkpoint %s", run_id, pre_run_checkpoint_id)
                 except Exception:
@@ -210,6 +213,7 @@ async def run_agent(
                     run_id=run_id,
                     pre_run_checkpoint_id=pre_run_checkpoint_id,
                     pre_run_snapshot=pre_run_snapshot,
+                    snapshot_capture_failed=snapshot_capture_failed,
                 )
                 logger.info("Run %s was cancelled and rolled back", run_id)
             except Exception:
@@ -259,22 +263,34 @@ async def _rollback_to_pre_run_checkpoint(
     run_id: str,
     pre_run_checkpoint_id: str | None,
     pre_run_snapshot: dict[str, Any] | None,
+    snapshot_capture_failed: bool,
 ) -> None:
     """Restore thread state to the checkpoint snapshot captured before run start."""
     if checkpointer is None:
         logger.info("Run %s rollback requested but no checkpointer is configured", run_id)
         return
 
+    if snapshot_capture_failed:
+        logger.warning("Run %s rollback skipped: pre-run checkpoint snapshot capture failed", run_id)
+        return
+
+    checkpoint_to_restore = None
+    metadata_to_restore: dict[str, Any] = {}
+    checkpoint_ns = ""
     if pre_run_snapshot is not None:
         checkpoint = pre_run_snapshot.get("checkpoint")
         if not isinstance(checkpoint, dict):
             logger.warning("Run %s rollback skipped: invalid pre-run checkpoint snapshot", run_id)
             return
-        if checkpoint.get("id") is None and pre_run_checkpoint_id is not None:
-            checkpoint["id"] = pre_run_checkpoint_id
-        if checkpoint.get("id") is None:
+        checkpoint_to_restore = checkpoint
+        if checkpoint_to_restore.get("id") is None and pre_run_checkpoint_id is not None:
+            checkpoint_to_restore = {**checkpoint_to_restore, "id": pre_run_checkpoint_id}
+        if checkpoint_to_restore.get("id") is None:
             logger.warning("Run %s rollback skipped: pre-run checkpoint has no checkpoint id", run_id)
             return
+        metadata = pre_run_snapshot.get("metadata", {})
+        metadata_to_restore = metadata if isinstance(metadata, dict) else {}
+        checkpoint_ns = str(pre_run_snapshot.get("checkpoint_ns", ""))
 
     await _call_checkpointer_method(checkpointer, "adelete_thread", "delete_thread", thread_id)
 
@@ -282,11 +298,8 @@ async def _rollback_to_pre_run_checkpoint(
         logger.info("Run %s rollback reset thread %s to empty state", run_id, thread_id)
         return
 
-    checkpoint_to_restore = copy.deepcopy(pre_run_snapshot["checkpoint"])
-    metadata_to_restore = copy.deepcopy(pre_run_snapshot.get("metadata", {}))
-    checkpoint_ns = str(pre_run_snapshot.get("checkpoint_ns", ""))
     channel_versions = checkpoint_to_restore.get("channel_versions")
-    new_versions = copy.deepcopy(channel_versions) if isinstance(channel_versions, dict) else {}
+    new_versions = dict(channel_versions) if isinstance(channel_versions, dict) else {}
 
     restore_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": checkpoint_ns}}
     restored_config = await _call_checkpointer_method(
