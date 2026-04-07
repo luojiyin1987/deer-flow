@@ -274,29 +274,28 @@ async def _rollback_to_pre_run_checkpoint(
         logger.warning("Run %s rollback skipped: pre-run checkpoint snapshot capture failed", run_id)
         return
 
+    if pre_run_snapshot is None:
+        await _call_checkpointer_method(checkpointer, "adelete_thread", "delete_thread", thread_id)
+        logger.info("Run %s rollback reset thread %s to empty state", run_id, thread_id)
+        return
+
     checkpoint_to_restore = None
     metadata_to_restore: dict[str, Any] = {}
     checkpoint_ns = ""
-    if pre_run_snapshot is not None:
-        checkpoint = pre_run_snapshot.get("checkpoint")
-        if not isinstance(checkpoint, dict):
-            logger.warning("Run %s rollback skipped: invalid pre-run checkpoint snapshot", run_id)
-            return
-        checkpoint_to_restore = checkpoint
-        if checkpoint_to_restore.get("id") is None and pre_run_checkpoint_id is not None:
-            checkpoint_to_restore = {**checkpoint_to_restore, "id": pre_run_checkpoint_id}
-        if checkpoint_to_restore.get("id") is None:
-            logger.warning("Run %s rollback skipped: pre-run checkpoint has no checkpoint id", run_id)
-            return
-        metadata = pre_run_snapshot.get("metadata", {})
-        metadata_to_restore = metadata if isinstance(metadata, dict) else {}
-        checkpoint_ns = str(pre_run_snapshot.get("checkpoint_ns", ""))
-
-    await _call_checkpointer_method(checkpointer, "adelete_thread", "delete_thread", thread_id)
-
-    if pre_run_snapshot is None:
-        logger.info("Run %s rollback reset thread %s to empty state", run_id, thread_id)
+    checkpoint = pre_run_snapshot.get("checkpoint")
+    if not isinstance(checkpoint, dict):
+        logger.warning("Run %s rollback skipped: invalid pre-run checkpoint snapshot", run_id)
         return
+    checkpoint_to_restore = checkpoint
+    if checkpoint_to_restore.get("id") is None and pre_run_checkpoint_id is not None:
+        checkpoint_to_restore = {**checkpoint_to_restore, "id": pre_run_checkpoint_id}
+    if checkpoint_to_restore.get("id") is None:
+        logger.warning("Run %s rollback skipped: pre-run checkpoint has no checkpoint id", run_id)
+        return
+    metadata = pre_run_snapshot.get("metadata", {})
+    metadata_to_restore = metadata if isinstance(metadata, dict) else {}
+    raw_checkpoint_ns = pre_run_snapshot.get("checkpoint_ns")
+    checkpoint_ns = raw_checkpoint_ns if isinstance(raw_checkpoint_ns, str) else ""
 
     channel_versions = checkpoint_to_restore.get("channel_versions")
     new_versions = dict(channel_versions) if isinstance(channel_versions, dict) else {}
@@ -311,6 +310,14 @@ async def _rollback_to_pre_run_checkpoint(
         metadata_to_restore if isinstance(metadata_to_restore, dict) else {},
         new_versions,
     )
+    if not isinstance(restored_config, dict):
+        raise RuntimeError(f"Run {run_id} rollback restore returned invalid config: expected dict")
+    restored_configurable = restored_config.get("configurable", {})
+    if not isinstance(restored_configurable, dict):
+        raise RuntimeError(f"Run {run_id} rollback restore returned invalid config payload")
+    restored_checkpoint_id = restored_configurable.get("checkpoint_id")
+    if not restored_checkpoint_id:
+        raise RuntimeError(f"Run {run_id} rollback restore did not return checkpoint_id")
 
     pending_writes = pre_run_snapshot.get("pending_writes", [])
     if not pending_writes:
@@ -319,10 +326,10 @@ async def _rollback_to_pre_run_checkpoint(
     writes_by_task: dict[str, list[tuple[str, Any]]] = {}
     for item in pending_writes:
         if not isinstance(item, (tuple, list)) or len(item) != 3:
-            continue
+            raise RuntimeError(f"Run {run_id} rollback failed: pending_write is not a 3-tuple: {item!r}")
         task_id, channel, value = item
         if not isinstance(channel, str):
-            continue
+            raise RuntimeError(f"Run {run_id} rollback failed: pending_write has non-string channel: task_id={task_id!r}, channel={channel!r}")
         writes_by_task.setdefault(str(task_id), []).append((channel, value))
 
     for task_id, writes in writes_by_task.items():
