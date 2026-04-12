@@ -1,4 +1,5 @@
-from unittest.mock import MagicMock, patch
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from deerflow.agents.memory.prompt import format_conversation_for_update
 from deerflow.agents.memory.updater import (
@@ -523,15 +524,16 @@ class TestUpdateMemoryStructuredResponse:
         model = MagicMock()
         response = MagicMock()
         response.content = content
-        model.invoke.return_value = response
+        model.ainvoke = AsyncMock(return_value=response)
         return model
 
     def test_string_response_parses(self):
         updater = MemoryUpdater()
         valid_json = '{"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}'
+        model = self._make_mock_model(valid_json)
 
         with (
-            patch.object(updater, "_get_model", return_value=self._make_mock_model(valid_json)),
+            patch.object(updater, "_get_model", return_value=model),
             patch("deerflow.agents.memory.updater.get_memory_config", return_value=_memory_config(enabled=True)),
             patch("deerflow.agents.memory.updater.get_memory_data", return_value=_make_memory()),
             patch("deerflow.agents.memory.updater.get_memory_storage", return_value=MagicMock(save=MagicMock(return_value=True))),
@@ -546,6 +548,7 @@ class TestUpdateMemoryStructuredResponse:
             result = updater.update_memory([msg, ai_msg])
 
         assert result is True
+        model.ainvoke.assert_awaited_once()
 
     def test_list_content_response_parses(self):
         """LLM response as list-of-blocks should be extracted, not repr'd."""
@@ -570,6 +573,29 @@ class TestUpdateMemoryStructuredResponse:
 
         assert result is True
 
+    def test_async_update_memory_uses_ainvoke(self):
+        updater = MemoryUpdater()
+        valid_json = '{"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}'
+        model = self._make_mock_model(valid_json)
+
+        with (
+            patch.object(updater, "_get_model", return_value=model),
+            patch("deerflow.agents.memory.updater.get_memory_config", return_value=_memory_config(enabled=True)),
+            patch("deerflow.agents.memory.updater.get_memory_data", return_value=_make_memory()),
+            patch("deerflow.agents.memory.updater.get_memory_storage", return_value=MagicMock(save=MagicMock(return_value=True))),
+        ):
+            msg = MagicMock()
+            msg.type = "human"
+            msg.content = "Hello"
+            ai_msg = MagicMock()
+            ai_msg.type = "ai"
+            ai_msg.content = "Hi there"
+            ai_msg.tool_calls = []
+            result = asyncio.run(updater.aupdate_memory([msg, ai_msg]))
+
+        assert result is True
+        model.ainvoke.assert_awaited_once()
+
     def test_correction_hint_injected_when_detected(self):
         updater = MemoryUpdater()
         valid_json = '{"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}'
@@ -592,7 +618,7 @@ class TestUpdateMemoryStructuredResponse:
             result = updater.update_memory([msg, ai_msg], correction_detected=True)
 
         assert result is True
-        prompt = model.invoke.call_args[0][0]
+        prompt = model.ainvoke.await_args.args[0]
         assert "Explicit correction signals were detected" in prompt
 
     def test_correction_hint_empty_when_not_detected(self):
@@ -617,8 +643,35 @@ class TestUpdateMemoryStructuredResponse:
             result = updater.update_memory([msg, ai_msg], correction_detected=False)
 
         assert result is True
-        prompt = model.invoke.call_args[0][0]
+        prompt = model.ainvoke.await_args.args[0]
         assert "Explicit correction signals were detected" not in prompt
+
+    def test_sync_update_memory_wrapper_works_in_running_loop(self):
+        updater = MemoryUpdater()
+        valid_json = '{"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}'
+        model = self._make_mock_model(valid_json)
+
+        with (
+            patch.object(updater, "_get_model", return_value=model),
+            patch("deerflow.agents.memory.updater.get_memory_config", return_value=_memory_config(enabled=True)),
+            patch("deerflow.agents.memory.updater.get_memory_data", return_value=_make_memory()),
+            patch("deerflow.agents.memory.updater.get_memory_storage", return_value=MagicMock(save=MagicMock(return_value=True))),
+        ):
+            msg = MagicMock()
+            msg.type = "human"
+            msg.content = "Hello from loop"
+            ai_msg = MagicMock()
+            ai_msg.type = "ai"
+            ai_msg.content = "Hi"
+            ai_msg.tool_calls = []
+
+            async def run_in_loop():
+                return updater.update_memory([msg, ai_msg])
+
+            result = asyncio.run(run_in_loop())
+
+        assert result is True
+        model.ainvoke.assert_awaited_once()
 
 
 class TestFactDeduplicationCaseInsensitive:
@@ -694,7 +747,7 @@ class TestReinforcementHint:
         model = MagicMock()
         response = MagicMock()
         response.content = f"```json\n{json_response}\n```"
-        model.invoke.return_value = response
+        model.ainvoke = AsyncMock(return_value=response)
         return model
 
     def test_reinforcement_hint_injected_when_detected(self):
@@ -719,7 +772,7 @@ class TestReinforcementHint:
             result = updater.update_memory([msg, ai_msg], reinforcement_detected=True)
 
         assert result is True
-        prompt = model.invoke.call_args[0][0]
+        prompt = model.ainvoke.await_args.args[0]
         assert "Positive reinforcement signals were detected" in prompt
 
     def test_reinforcement_hint_absent_when_not_detected(self):
@@ -744,7 +797,7 @@ class TestReinforcementHint:
             result = updater.update_memory([msg, ai_msg], reinforcement_detected=False)
 
         assert result is True
-        prompt = model.invoke.call_args[0][0]
+        prompt = model.ainvoke.await_args.args[0]
         assert "Positive reinforcement signals were detected" not in prompt
 
     def test_both_hints_present_when_both_detected(self):
@@ -769,6 +822,6 @@ class TestReinforcementHint:
             result = updater.update_memory([msg, ai_msg], correction_detected=True, reinforcement_detected=True)
 
         assert result is True
-        prompt = model.invoke.call_args[0][0]
+        prompt = model.ainvoke.await_args.args[0]
         assert "Explicit correction signals were detected" in prompt
         assert "Positive reinforcement signals were detected" in prompt
