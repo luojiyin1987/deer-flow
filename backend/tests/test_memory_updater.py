@@ -1,10 +1,13 @@
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from deerflow.agents.memory.prompt import format_conversation_for_update
 from deerflow.agents.memory.updater import (
     MemoryUpdater,
     _extract_text,
+    _run_async_update_sync,
     clear_memory_data,
     create_memory_fact,
     delete_memory_fact,
@@ -672,6 +675,58 @@ class TestUpdateMemoryStructuredResponse:
 
         assert result is True
         model.ainvoke.assert_awaited_once()
+
+    def test_sync_update_memory_returns_false_when_bridge_submit_fails(self):
+        updater = MemoryUpdater()
+
+        with (
+            patch(
+                "deerflow.agents.memory.updater._SYNC_MEMORY_UPDATER_EXECUTOR.submit",
+                side_effect=RuntimeError("executor down"),
+            ),
+        ):
+            msg = MagicMock()
+            msg.type = "human"
+            msg.content = "Hello from loop"
+            ai_msg = MagicMock()
+            ai_msg.type = "ai"
+            ai_msg.content = "Hi"
+            ai_msg.tool_calls = []
+
+            async def run_in_loop():
+                return updater.update_memory([msg, ai_msg])
+
+            result = asyncio.run(run_in_loop())
+
+        assert result is False
+
+
+class TestRunAsyncUpdateSync:
+    def test_closes_unawaited_awaitable_when_bridge_fails_before_handoff(self):
+        class CloseableAwaitable:
+            def __init__(self):
+                self.closed = False
+
+            def __await__(self):
+                pytest.fail("awaitable should not have been awaited")
+                yield
+
+            def close(self):
+                self.closed = True
+
+        awaitable = CloseableAwaitable()
+
+        with patch(
+            "deerflow.agents.memory.updater._SYNC_MEMORY_UPDATER_EXECUTOR.submit",
+            side_effect=RuntimeError("executor down"),
+        ):
+            async def run_in_loop():
+                return _run_async_update_sync(awaitable)
+
+            result = asyncio.run(run_in_loop())
+
+        assert result is False
+        assert awaitable.closed is True
 
 
 class TestFactDeduplicationCaseInsensitive:
