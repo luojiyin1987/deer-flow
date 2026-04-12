@@ -218,16 +218,35 @@ def _extract_text(content: Any) -> str:
 
 def _run_async_update_sync(coro: Awaitable[bool]) -> bool:
     """Run an async memory update from sync code, including nested-loop contexts."""
+    handed_off = False
+
     try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
 
-    if loop is not None and loop.is_running():
-        future = _SYNC_MEMORY_UPDATER_EXECUTOR.submit(asyncio.run, coro)
-        return future.result()
+        if loop is not None and loop.is_running():
+            future = _SYNC_MEMORY_UPDATER_EXECUTOR.submit(asyncio.run, coro)
+            handed_off = True
+            return future.result()
 
-    return asyncio.run(coro)
+        handed_off = True
+        return asyncio.run(coro)
+    except Exception:
+        if not handed_off:
+            close = getattr(coro, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    logger.debug(
+                        "Failed to close un-awaited memory update coroutine",
+                        exc_info=True,
+                    )
+
+        logger.exception("Failed to run async memory update from sync context")
+        return False
 
 
 # Matches sentences that describe a file-upload *event* rather than general
@@ -314,11 +333,7 @@ class MemoryUpdater:
                 "Record the confirmed approach, style, or preference as a fact with category "
                 '"preference" or "behavior" and confidence >= 0.9 when appropriate.'
             )
-            correction_hint = (
-                (correction_hint + "\n" + reinforcement_hint).strip()
-                if correction_hint
-                else reinforcement_hint
-            )
+            correction_hint = (correction_hint + "\n" + reinforcement_hint).strip() if correction_hint else reinforcement_hint
 
         return correction_hint
 
@@ -362,9 +377,7 @@ class MemoryUpdater:
 
         if response_text.startswith("```"):
             lines = response_text.split("\n")
-            response_text = "\n".join(
-                lines[1:-1] if lines[-1] == "```" else lines[1:]
-            )
+            response_text = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
 
         update_data = json.loads(response_text)
         updated_memory = self._apply_updates(current_memory, update_data, thread_id)
