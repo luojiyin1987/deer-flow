@@ -720,6 +720,7 @@ class TestRunAsyncUpdateSync:
             "deerflow.agents.memory.updater._SYNC_MEMORY_UPDATER_EXECUTOR.submit",
             side_effect=RuntimeError("executor down"),
         ):
+
             async def run_in_loop():
                 return _run_async_update_sync(awaitable)
 
