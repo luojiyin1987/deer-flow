@@ -8,6 +8,7 @@ import {
   isArtifactVirtualPath,
   normalizeArtifactVirtualPath,
   resolveArtifactURL,
+  urlOfArtifact,
 } from "@/core/artifacts/utils";
 
 test("recognizes artifact virtual paths with and without leading slash", () => {
@@ -37,5 +38,26 @@ test("builds artifact URLs for paths with and without leading slash", () => {
     resolveArtifactURL("mnt/user-data/outputs/result.docx", "thread-1"),
   ).toBe(
     "http://localhost:2026/api/threads/thread-1/artifacts/mnt/user-data/outputs/result.docx",
+  );
+});
+
+test("normalizes artifact URLs for direct and mock downloads", () => {
+  expect(
+    urlOfArtifact({
+      filepath: "mnt/user-data/outputs/result.docx",
+      threadId: "thread-1",
+    }),
+  ).toBe(
+    "http://localhost:2026/api/threads/thread-1/artifacts/mnt/user-data/outputs/result.docx",
+  );
+  expect(
+    urlOfArtifact({
+      filepath: "mnt/user-data/outputs/result.docx",
+      threadId: "thread-1",
+      download: true,
+      isMock: true,
+    }),
+  ).toBe(
+    "http://localhost:2026/mock/api/threads/thread-1/artifacts/mnt/user-data/outputs/result.docx?download=true",
   );
 });
