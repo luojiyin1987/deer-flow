@@ -20,10 +20,11 @@ export function urlOfArtifact({
   download?: boolean;
   isMock?: boolean;
 }) {
+  const normalizedFilepath = normalizeArtifactVirtualPath(filepath);
   if (isMock) {
-    return `${getBackendBaseURL()}/mock/api/threads/${threadId}/artifacts${filepath}${download ? "?download=true" : ""}`;
+    return `${getBackendBaseURL()}/mock/api/threads/${threadId}/artifacts${normalizedFilepath}${download ? "?download=true" : ""}`;
   }
-  return `${getBackendBaseURL()}/api/threads/${threadId}/artifacts${filepath}${download ? "?download=true" : ""}`;
+  return `${getBackendBaseURL()}/api/threads/${threadId}/artifacts${normalizedFilepath}${download ? "?download=true" : ""}`;
 }
 
 export function extractArtifactsFromThread(thread: AgentThread) {
