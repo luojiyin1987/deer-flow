@@ -43,10 +43,12 @@ export function MessageGroup({
   className,
   messages,
   isLoading = false,
+  threadId,
 }: {
   className?: string;
   messages: Message[];
   isLoading?: boolean;
+  threadId?: string;
 }) {
   const { t } = useI18n();
   const [showAbove, setShowAbove] = useState(
@@ -120,6 +122,7 @@ export function MessageGroup({
                       content={step.reasoning ?? ""}
                       isLoading={isLoading}
                       rehypePlugins={rehypePlugins}
+                      threadId={threadId}
                     />
                   }
                 ></ChainOfThoughtStep>
@@ -172,6 +175,7 @@ export function MessageGroup({
                     content={lastReasoningStep.reasoning ?? ""}
                     isLoading={isLoading}
                     rehypePlugins={rehypePlugins}
+                    threadId={threadId}
                   />
                 }
               ></ChainOfThoughtStep>
