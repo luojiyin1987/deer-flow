@@ -26,7 +26,8 @@ vi.mock("@/core/i18n/hooks", () => ({
   }),
 }));
 
-vi.mock("@/core/messages/utils", () => {
+vi.mock("@/core/messages/utils", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/core/messages/utils")>();
   const clarificationMessage = { id: "clarification-message", type: "tool" };
   const presentFilesMessage = { id: "present-files-message", type: "ai" };
   const subagentMessage = {
@@ -47,6 +48,7 @@ vi.mock("@/core/messages/utils", () => {
   const processingMessage = { id: "processing-message", type: "ai" };
 
   return {
+    ...actual,
     groupMessages: (
       _messages: unknown[],
       mapper: (group: unknown) => unknown,
