@@ -25,6 +25,8 @@ from deerflow.persistence.run.sql import RunRepository
 from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, RunManager, RunStatus, goal
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor, build_state_mutation_graph
 from deerflow.runtime.checkpointer.run_owned_saver import CheckpointOwnershipLostError, RunOwnedSaver
+from deerflow.runtime.runs.manager import ConflictError
+from deerflow.runtime.runs.schemas import ThreadOperationKind
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 from deerflow.runtime.runs.worker import RunContext, _clear_completed_goal, _GoalCompletionCandidate, run_agent
 
@@ -395,6 +397,177 @@ async def test_real_rollback_restores_checkpoint_after_interrupted_status(saver)
         if not run.task.done():
             run.task.cancel()
         await asyncio.gather(run.task, return_exceptions=True)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("historical_checkpoint", [False, True])
+@pytest.mark.parametrize("admission", ["remote", "replacement"])
+async def test_successor_waits_for_prior_rollback(saver, monkeypatch, historical_checkpoint, admission) -> None:
+    import deerflow.runtime.runs.worker as worker_module
+
+    thread_id = "checkpoint-rollback-successor-" + uuid4().hex
+    config = {"configurable": {"thread_id": thread_id}}
+    checkpointer = saver.checkpointer
+    if historical_checkpoint:
+        await _graph(checkpointer, lambda state: {"value": "before"}).ainvoke({"value": "before"}, config=config)
+
+    ownership = RunOwnershipConfig(lease_seconds=30, grace_seconds=1, heartbeat_enabled=True)
+    old_manager = RunManager(store=saver.store, worker_id="rollback-old", run_ownership_config=ownership)
+    new_manager = RunManager(store=saver.store, worker_id="rollback-new", run_ownership_config=ownership)
+    if admission == "replacement":
+        new_manager = old_manager
+    old_run = await old_manager.create_or_reject(thread_id, user_id="alice")
+    old_entered = asyncio.Event()
+    rollback_entered = asyncio.Event()
+    rollback_release = asyncio.Event()
+    successor_checked = asyncio.Event()
+    new_entered = asyncio.Event()
+    original_rollback = worker_module._rollback_to_pre_run_checkpoint
+    original_check = saver.store.has_live_prior_rollback
+
+    async def held_rollback(**kwargs):
+        rollback_entered.set()
+        await rollback_release.wait()
+        return await original_rollback(**kwargs)
+
+    async def observed_check(checked_thread_id, checked_run_id):
+        result = await original_check(checked_thread_id, checked_run_id)
+        if checked_run_id != old_run.run_id and result:
+            successor_checked.set()
+        return result
+
+    monkeypatch.setattr(worker_module, "_rollback_to_pre_run_checkpoint", held_rollback)
+    monkeypatch.setattr(saver.store, "has_live_prior_rollback", observed_check)
+
+    async def old_node(state: _State) -> _State:
+        old_entered.set()
+        await asyncio.Event().wait()
+        return {"value": "during"}
+
+    async def new_node(state: _State) -> _State:
+        new_entered.set()
+        return {"value": "after"}
+
+    bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
+    context = RunContext(checkpointer=checkpointer, event_store=None)
+    old_run.task = asyncio.create_task(run_agent(bridge, old_manager, old_run, ctx=context, agent_factory=lambda **kwargs: _graph(checkpointer, old_node), graph_input={"value": "during"}, config=config))
+    new_run = None
+    try:
+        await asyncio.wait_for(old_entered.wait(), 5)
+        if admission == "remote":
+            await old_manager.cancel(old_run.run_id, action="rollback")
+        else:
+            new_run = await new_manager.create_or_reject(thread_id, user_id="alice", multitask_strategy="rollback")
+        await asyncio.wait_for(rollback_entered.wait(), 5)
+        if new_run is None:
+            new_run = await new_manager.create_or_reject(thread_id, user_id="alice")
+        new_run.task = asyncio.create_task(run_agent(bridge, new_manager, new_run, ctx=context, agent_factory=lambda **kwargs: _graph(checkpointer, new_node), graph_input={"value": "after"}, config=config))
+        await asyncio.wait_for(successor_checked.wait(), 5)
+        assert not new_entered.is_set()
+        with pytest.raises(CheckpointOwnershipLostError):
+            await RunOwnedSaver(checkpointer, new_manager, new_run).adelete_thread(thread_id)
+        rollback_release.set()
+        await asyncio.wait_for(asyncio.shield(old_run.task), 10)
+        await asyncio.wait_for(asyncio.shield(new_run.task), 10)
+        final = await checkpointer.aget_tuple(config)
+        assert final is not None
+        assert final.checkpoint["channel_values"]["value"] == "after"
+        assert (await saver.store.get(old_run.run_id, user_id="alice"))["status"] == "error"
+    finally:
+        rollback_release.set()
+        for run in (old_run, new_run):
+            if run is not None and run.task is not None and not run.task.done():
+                run.task.cancel()
+        await asyncio.gather(*(run.task for run in (old_run, new_run) if run is not None and run.task is not None), return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_rollback_reservation_expires_with_old_lease(saver) -> None:
+    manager = RunManager(
+        store=saver.store,
+        worker_id="expired-rollback-owner",
+        run_ownership_config=RunOwnershipConfig(lease_seconds=30, grace_seconds=1, heartbeat_enabled=True),
+    )
+    thread_id = "checkpoint-rollback-expiry-" + uuid4().hex
+    old_run = await manager.create_or_reject(thread_id, user_id="alice")
+    await saver.store.request_cancel(old_run.run_id, action="rollback")
+    await saver.store.update_status(old_run.run_id, "interrupted")
+    assert await saver.store.has_live_prior_rollback(thread_id, "successor")
+    peer = RunManager(store=saver.store, worker_id="rollback-peer", run_ownership_config=manager._run_ownership_config)
+    with pytest.raises(ConflictError):
+        async with peer.reserve_thread_operation(thread_id, kind=ThreadOperationKind.checkpoint_write, user_id="alice"):
+            pytest.fail("Checkpoint write entered during rollback")
+
+    expired = datetime.now(UTC) - timedelta(seconds=1)
+    if saver.session_factory is None:
+        saver.store._runs[old_run.run_id]["lease_expires_at"] = expired.isoformat()
+    else:
+        async with saver.session_factory() as session:
+            await session.execute(update(RunRow).where(RunRow.run_id == old_run.run_id).values(lease_expires_at=expired))
+            await session.commit()
+    assert not await saver.store.has_live_prior_rollback(thread_id, "successor")
+
+
+@pytest.mark.anyio
+async def test_postgres_waits_for_inflight_rollback_delete_after_lease_expiry(saver, monkeypatch) -> None:
+    if saver.kind != "postgres":
+        pytest.skip("requires the direct PostgreSQL saver")
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+    manager = RunManager(
+        store=saver.store,
+        worker_id="inflight-rollback-owner",
+        run_ownership_config=RunOwnershipConfig(lease_seconds=30, grace_seconds=1, heartbeat_enabled=True),
+    )
+    thread_id = "checkpoint-inflight-rollback-" + uuid4().hex
+    run = await manager.create_or_reject(thread_id, user_id="alice")
+    config = {"configurable": {"thread_id": thread_id}}
+    await _graph(saver.checkpointer, lambda state: {"value": "old"}).ainvoke({"value": "old"}, config=config)
+    await saver.store.request_cancel(run.run_id, action="rollback")
+    await saver.store.update_status(run.run_id, "interrupted")
+    run.rollback_finalization_pending = True
+    expiry = datetime.now(UTC) + timedelta(seconds=3)
+    async with saver.session_factory() as session:
+        await session.execute(update(RunRow).where(RunRow.run_id == run.run_id).values(lease_expires_at=expiry))
+        await session.commit()
+
+    delete_entered = asyncio.Event()
+    release_delete = asyncio.Event()
+    check_entered = asyncio.Event()
+    original_delete = AsyncPostgresSaver.adelete_thread
+    original_lock = saver.store._lock_checkpoint_thread
+
+    async def held_delete(self, checked_thread_id):
+        delete_entered.set()
+        await release_delete.wait()
+        return await original_delete(self, checked_thread_id)
+
+    async def observed_lock(session, checked_thread_id):
+        check_entered.set()
+        return await original_lock(session, checked_thread_id)
+
+    monkeypatch.setattr(AsyncPostgresSaver, "adelete_thread", held_delete)
+    monkeypatch.setattr(saver.store, "_lock_checkpoint_thread", observed_lock)
+    delete_task = asyncio.create_task(RunOwnedSaver(saver.checkpointer, manager, run).adelete_thread(thread_id))
+    check_task = None
+    try:
+        await asyncio.wait_for(delete_entered.wait(), 5)
+        while datetime.now(UTC) <= expiry:
+            await asyncio.sleep(0.01)
+        check_task = asyncio.create_task(saver.store.has_live_prior_rollback(thread_id, "successor"))
+        await asyncio.wait_for(check_entered.wait(), 5)
+        await asyncio.sleep(0)
+        assert not check_task.done()
+        release_delete.set()
+        await asyncio.wait_for(delete_task, 5)
+        assert not await asyncio.wait_for(check_task, 5)
+        assert await saver.checkpointer.aget_tuple(config) is None
+    finally:
+        release_delete.set()
+        for task in (delete_task, check_task):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(*(task for task in (delete_task, check_task) if task is not None), return_exceptions=True)
 
 
 @pytest.mark.anyio

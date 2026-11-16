@@ -208,6 +208,10 @@ class RunStore(abc.ABC):
     ) -> list[dict[str, Any]]:
         pass
 
+    async def has_live_prior_rollback(self, thread_id: str, run_id: str) -> bool:
+        """Report a live rollback that must finish before this run reads state."""
+        raise NotImplementedError
+
     async def list_by_thread_created_at(self, thread_id: str, *, user_id: str, created_at: str) -> list[dict[str, Any]]:
         """Return all exact owner/thread/timestamp matches, without pagination.
 

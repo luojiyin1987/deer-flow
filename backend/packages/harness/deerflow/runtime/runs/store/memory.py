@@ -23,6 +23,22 @@ from deerflow.runtime.runs.store.base import (
 class MemoryRunStore(RunStore):
     supports_run_inputs = True
 
+    async def has_live_prior_rollback(self, thread_id: str, run_id: str) -> bool:
+        now = datetime.now(UTC)
+        for row in self._runs.values():
+            if row["thread_id"] != thread_id or row["run_id"] == run_id:
+                continue
+            if row.get("operation_kind", "run") != "run" or row["status"] != "interrupted" or row.get("cancel_action") != "rollback":
+                continue
+            lease = row.get("lease_expires_at")
+            if lease:
+                deadline = datetime.fromisoformat(lease)
+                if deadline.tzinfo is None:
+                    deadline = deadline.replace(tzinfo=UTC)
+                if deadline > now:
+                    return True
+        return False
+
     async def mutate_run_inputs(self, run_id, change, *, user_id=None, owner_worker_id=None):
         from deerflow.runtime.runs.inputs import InputConflict, empty_input_state
 
@@ -605,6 +621,9 @@ class MemoryRunStore(RunStore):
         idempotency_request: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         from deerflow.runtime.runs.manager import ConflictError
+
+        if operation_kind != "run" and await self.has_live_prior_rollback(thread_id, run_id):
+            raise ConflictError(f"Thread {thread_id} has a rollback awaiting finalization")
 
         now = datetime.now(UTC).isoformat()
         cutoff = datetime.now(UTC) - timedelta(seconds=grace_seconds)

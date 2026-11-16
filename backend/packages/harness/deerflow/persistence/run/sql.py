@@ -387,6 +387,28 @@ class RunRepository(RunStore):
             result = await session.execute(stmt)
             return [self._row_to_dict(r) for r in result.scalars()]
 
+    async def has_live_prior_rollback(self, thread_id: str, run_id: str) -> bool:
+        async with self._sf() as session:
+            await self._lock_checkpoint_thread(session, thread_id)
+            stmt = (
+                select(RunRow.run_id)
+                .where(
+                    RunRow.thread_id == thread_id,
+                    RunRow.run_id != run_id,
+                    RunRow.operation_kind == "run",
+                    RunRow.status == "interrupted",
+                    RunRow.cancel_action == "rollback",
+                    self._live_lease_predicate(session),
+                )
+                .limit(1)
+            )
+            return (await session.execute(stmt)).first() is not None
+
+    @staticmethod
+    async def _lock_checkpoint_thread(session: AsyncSession, thread_id: str) -> None:
+        if session.bind.dialect.name == "postgresql":
+            await session.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:thread_id, 0))"), {"thread_id": "deerflow:checkpoint:" + thread_id})
+
     async def list_by_thread_created_at(self, thread_id, *, user_id, created_at):
         timestamp = datetime.fromisoformat(canonical_run_created_at(created_at))
         async with self._sf() as session:
@@ -1199,6 +1221,22 @@ class RunRepository(RunStore):
                 existing = (await session.execute(select(RunRow).where(RunRow.idempotency_key == idempotency_key).with_for_update())).scalar_one_or_none()
                 if existing is not None:
                     raise RunIdempotencyConflict(self._row_to_dict(existing))
+
+            if operation_kind != "run":
+                await self._lock_checkpoint_thread(session, thread_id)
+                rollback = await session.execute(
+                    select(RunRow.run_id)
+                    .where(
+                        RunRow.thread_id == thread_id,
+                        RunRow.operation_kind == "run",
+                        RunRow.status == "interrupted",
+                        RunRow.cancel_action == "rollback",
+                        self._live_lease_predicate(session),
+                    )
+                    .limit(1)
+                )
+                if rollback.first() is not None:
+                    raise ConflictError(f"Thread {thread_id} has a rollback awaiting finalization")
 
             if multitask_strategy in ("interrupt", "rollback"):
                 stmt = (
