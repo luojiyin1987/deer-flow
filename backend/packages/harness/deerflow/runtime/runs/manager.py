@@ -1877,11 +1877,17 @@ class RunManager:
                     if record.run_id == run_id:
                         found_current = True
                         break
-                    if record.finalizing:
+                    if record.finalizing and not record.ownership_lost:
                         prior_finalizing = True
 
-                if not found_current or not prior_finalizing:
+                if not found_current:
                     return
+
+            prior_rollback = False
+            if self._store is not None and self.heartbeat_enabled:
+                prior_rollback = await self._store.has_live_prior_rollback(thread_id, run_id)
+            if not prior_finalizing and not prior_rollback:
+                return
 
             if abort_event is None:
                 await asyncio.sleep(poll_interval)

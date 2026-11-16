@@ -47,6 +47,8 @@ class RunOwnedSaver(BaseCheckpointSaver):
             raise CheckpointOwnershipLostError("Checkpoint thread differs from the owned run")
         if not await self._run_manager.owns_active_admission(self._record, reason="Checkpoint write lost its active run lease."):
             raise CheckpointOwnershipLostError("Run lost checkpoint write ownership")
+        if self._run_manager._store is not None and not self._record.rollback_finalization_pending and await self._run_manager._store.has_live_prior_rollback(self._record.thread_id, self._record.run_id):
+            raise CheckpointOwnershipLostError("Thread rollback still owns checkpoint state")
 
     @asynccontextmanager
     async def _postgres_writer(self, config):
@@ -70,6 +72,7 @@ class RunOwnedSaver(BaseCheckpointSaver):
                 yield connection_source
 
         async with source.lock, connection() as conn, drained_async_context(conn.transaction()):
+            await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", ("deerflow:checkpoint:" + self._record.thread_id,))
             await conn.execute("SELECT run_id FROM runs WHERE run_id = %s FOR UPDATE", (self._record.run_id,))
             cursor = await conn.execute(
                 """
@@ -97,6 +100,20 @@ class RunOwnedSaver(BaseCheckpointSaver):
             )
             if await cursor.fetchone() is None:
                 raise CheckpointOwnershipLostError("Run lost checkpoint write ownership")
+            if not self._record.rollback_finalization_pending:
+                cursor = await conn.execute(
+                    """
+                    SELECT 1 FROM runs
+                    WHERE thread_id = %s AND run_id != %s
+                      AND operation_kind = 'run' AND status = 'interrupted'
+                      AND cancel_action = 'rollback'
+                      AND lease_expires_at > clock_timestamp()
+                    LIMIT 1
+                    """,
+                    (self._record.thread_id, self._record.run_id),
+                )
+                if await cursor.fetchone() is not None:
+                    raise CheckpointOwnershipLostError("Thread rollback still owns checkpoint state")
             yield AsyncPostgresSaver(conn=conn, serde=source.serde)
 
     def get_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
